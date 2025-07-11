@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Output files
+multi_hop_output/
+output/
+*.json
+!data/demo.json
+!raw_test.json
+
+# Log files
+*.log
+hs_err_pid*.log
+
+# Environment variables
+.env
+config.env
+
+# Model files (too large)
+vncorenlp/models/
+*.bin
+*.model
+
+# Temporary files
+*.tmp
+*.temp 

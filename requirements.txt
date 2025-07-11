@@ -1,0 +1,14 @@
+py_vncorenlp
+networkx
+matplotlib
+numpy
+openai
+python-dotenv
+transformers
+torch
+faiss-cpu
+tqdm 
+protobuf>=3.20.0
+sentencepiece
+sentence-transformers
+scikit-learn 
