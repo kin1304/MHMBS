@@ -497,8 +497,14 @@ class MultiHopMultiBeamProcessor:
                 individual_multi_results = text_graph.multi_level_beam_search_paths(
                     max_levels=max_levels,
                     beam_width_per_level=beam_width,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    claim_text=claim_text,
+                    entities=reused_entities
                 )
+                
+                # Pass use_phobert option to beam search if available
+                if hasattr(self, 'use_phobert_level_filtering'):
+                    text_graph.use_phobert_level_filtering = self.use_phobert_level_filtering
                 
                 # Extract sentences from this individual search với deduplication
                 individual_sentences = []
@@ -530,29 +536,16 @@ class MultiHopMultiBeamProcessor:
                 
 
                 
-                # STAGE 2: Advanced Filtering cho sentences từ node này
+                # STAGE 2: Collect raw sentences without filtering
                 if new_sentences_from_this_node:
-                    filtered_from_this_node = self._apply_advanced_filtering(
-                        new_sentences_from_this_node, claim_text, reused_entities, 
-                        max_final_sentences, hop_num=hop_num
-                    )
-                    
-                    # STAGE 3: SBERT Reranking cho sentences từ node này
-                    if self.use_sbert and self.sbert_model and filtered_from_this_node:
-                        filtered_from_this_node = self._apply_final_sbert_reranking(
-                            filtered_from_this_node, claim_text,
-                            use_phobert=False,  # ✅ Dùng SBERT
-                            text_graph=text_graph
-                        )
-                    
-                    # Add hop number to each sentence
-                    for sent_info in filtered_from_this_node:
+                    # Add hop number to each sentence without individual filtering
+                    for sent_info in new_sentences_from_this_node:
                         sent_info['hop_number'] = hop_num
                         sent_info['start_node_index'] = i
                         sent_info['start_node_text'] = sentence_text[:50] + "..."
                     
-                    all_new_sentences.extend(filtered_from_this_node)
-                    print(f"   🎯 Final filtered: {len(filtered_from_this_node)} sentences from this node")
+                    all_new_sentences.extend(new_sentences_from_this_node)
+                    print(f"   📦 Collected: {len(new_sentences_from_this_node)} raw sentences from this node")
                 
                 # Store individual result for debugging
                 individual_results.append({
@@ -560,16 +553,38 @@ class MultiHopMultiBeamProcessor:
                     'start_node_text': sentence_text,
                     'raw_count': len(individual_sentences),
                     'new_unique_count': len(new_sentences_from_this_node),
-                    'final_filtered_count': len(new_sentences_from_this_node) if not new_sentences_from_this_node else len(filtered_from_this_node)
+                    'final_collected_count': len(new_sentences_from_this_node)
                 })
             
-            # STAGE 4: Final sorting và limiting - Hop 2+ chỉ lấy 3-4 sentences
-            if all_new_sentences:
+            # STAGE 4: Apply Advanced Filtering AFTER beam search complete
+            if all_new_sentences and self.use_advanced_filtering and self.advanced_filter:
+                print(f"🔍 Hop {hop_num}: Applying advanced filtering to {len(all_new_sentences)} raw sentences...")
+                filtered_sentences = self._apply_advanced_filtering(
+                    all_new_sentences, claim_text, reused_entities, 
+                    max_final_sentences, hop_num=hop_num
+                )
+                print(f"✅ Hop {hop_num}: Advanced filter kept {len(filtered_sentences)}/{len(all_new_sentences)} sentences")
+            else:
+                filtered_sentences = all_new_sentences
+                print(f"✅ Hop {hop_num}: Kept all {len(filtered_sentences)} sentences (filtering disabled)")
+            
+            # STAGE 5: Apply SBERT reranking AFTER filtering
+            if filtered_sentences and self.use_sbert and self.sbert_model:
+                print(f"🔄 Hop {hop_num}: Applying SBERT reranking to {len(filtered_sentences)} sentences...")
+                filtered_sentences = self._apply_final_sbert_reranking(
+                    filtered_sentences, claim_text,
+                    use_phobert=False,  # ✅ Dùng SBERT
+                    text_graph=text_graph
+                )
+                print(f"✅ Hop {hop_num}: SBERT reranking complete")
+
+            # STAGE 6: Final sorting và limiting - Hop 2+ chỉ lấy 3-4 sentences
+            if filtered_sentences:
                 # Sort by score and limit
-                all_new_sentences.sort(key=lambda x: x.get('score', 0), reverse=True)
+                filtered_sentences.sort(key=lambda x: x.get('score', 0), reverse=True)
                 # Hop 2+ chỉ lấy tối đa 4 sentences
                 hop_limit = 4 if hop_num > 1 else max_final_sentences
-                final_limited_sentences = all_new_sentences[:hop_limit]
+                final_limited_sentences = filtered_sentences[:hop_limit]
                 print(f"✅ Hop {hop_num}: Limited to {len(final_limited_sentences)} sentences (max {hop_limit} for hop {hop_num})")
             else:
                 final_limited_sentences = []
@@ -988,6 +1003,13 @@ class MultiHopMultiBeamProcessor:
         sample_graph = TextGraph()
         sample_graph._init_openai_client()
         
+        # Pass SBERT model to TextGraph for level filtering
+        if self.use_sbert and self.sbert_model:
+            sample_graph.sbert_model = self.sbert_model
+            
+        # Set PhoBERT level filtering option (can be toggled)
+        sample_graph.use_phobert_level_filtering = getattr(self, 'use_phobert_level_filtering', False)
+        
         # Build graph từ VnCoreNLP output  
         sample_graph.build_from_vncorenlp_output(context_sentences, claim_text, claim_sentences)
         
@@ -1349,6 +1371,8 @@ def main():
                        help='Sort final sentences by original order (sentence_0, sentence_1...) instead of scores')
     parser.add_argument('--sort_by_score', action='store_true', default=False,
                        help='Sort final sentences by scores instead of original order')
+    parser.add_argument('--use_phobert_level_filtering', action='store_true', default=False,
+                       help='Use PhoBERT instead of SBERT for level filtering in beam search')
     
     args = parser.parse_args()
 
@@ -1374,6 +1398,13 @@ def main():
         stance_delta=args.stance_delta,
         require_subject_match=args.require_subject_match,
     )
+    
+    # Set PhoBERT level filtering option
+    processor.use_phobert_level_filtering = args.use_phobert_level_filtering
+    if args.use_phobert_level_filtering:
+        print("🔍 Using PhoBERT for level filtering in beam search")
+    else:
+        print("🔍 Using SBERT for level filtering in beam search")
     
     # Setup VnCoreNLP
     original_dir = os.getcwd()

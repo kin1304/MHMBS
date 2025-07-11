@@ -1366,7 +1366,7 @@ Văn bản:
         advanced_data_filter=None,
         claim_text="",
         entities=None,
-        filter_top_k: int = 2
+        filter_top_k: int = 5
     ) -> Dict[int, List]:
         """
         Multi-level beam search wrapper cho TextGraph
@@ -1396,10 +1396,11 @@ Văn bản:
             max_levels=max_levels,
             beam_width_per_level=beam_width_per_level,
             min_new_sentences=min_new_sentences,
-            advanced_data_filter=advanced_data_filter,
+            sbert_model=getattr(self, 'sbert_model', None),
             claim_text=claim_text,
             entities=entities,
-            filter_top_k=filter_top_k
+            filter_top_k=filter_top_k,
+            use_phobert=False
         )
         
         return multi_results 
@@ -1543,7 +1544,7 @@ Văn bản:
         advanced_data_filter=None,
         claim_text="",
         entities=None,
-        filter_top_k: int = 2,
+        filter_top_k: int = 5,
         use_direct_as_starting_points: bool = True,
         sort_by_original_order: bool = False
     ) -> Dict:
@@ -1602,7 +1603,6 @@ Văn bản:
                 beam_width_per_level=beam_width_per_level,
                 max_depth=max_depth,
                 min_new_sentences=min_new_sentences,
-                advanced_data_filter=advanced_data_filter,
                 claim_text=claim_text,
                 entities=entities,
                 filter_top_k=filter_top_k
@@ -1615,7 +1615,6 @@ Văn bản:
                 beam_width_per_level=beam_width_per_level,
                 max_depth=max_depth,
                 min_new_sentences=min_new_sentences,
-                advanced_data_filter=advanced_data_filter,
                 claim_text=claim_text,
                 entities=entities,
                 filter_top_k=filter_top_k
@@ -1665,10 +1664,9 @@ Văn bản:
         beam_width_per_level: int = 3,
         max_depth: int = 30,
         min_new_sentences: int = 2,
-        advanced_data_filter=None,
         claim_text="",
         entities=None,
-        filter_top_k: int = 2
+        filter_top_k: int = 5
     ) -> Dict[int, List]:
         """
         Beam search từ direct connected sentences thay vì từ claim
@@ -1748,32 +1746,60 @@ Văn bản:
                 final_new_sentences = path_finder._extract_sentence_nodes_from_paths(level_paths)
                 unique_new = [s for s in final_new_sentences if s not in all_found_sentences]
                 
-                # Áp dụng advanced filter nếu có
-                if advanced_data_filter and claim_text and unique_new:
+                # 🔍 Apply SBERT/PhoBERT filtering at each level
+                if hasattr(self, 'sbert_model') and self.sbert_model and claim_text and unique_new:
                     try:
-                        raw_sentences = [
-                            {"sentence": self.graph.nodes[node]["text"]}
-                            for node in unique_new
-                        ]
-                        filtered = advanced_data_filter.multi_stage_filtering_pipeline(
-                            sentences=raw_sentences,
-                            claim_text=claim_text,
-                            entities=entities or [],
-                            max_final_sentences=filter_top_k,
-                            min_quality_score=0.25,
-                            min_relevance_score=0.2
-                        )["filtered_sentences"]
+                        # Get sentence texts from nodes
+                        sentence_texts = []
+                        for node in unique_new:
+                            node_text = self.graph.nodes[node].get("text", "")
+                            if node_text:
+                                sentence_texts.append(node_text)
                         
-                        filtered_texts = {s["sentence"] for s in filtered}
-                        filtered_nodes = [
-                            n for n in unique_new
-                            if self.graph.nodes[n]["text"] in filtered_texts
-                        ]
-                        if filtered_nodes:
-                            unique_new = filtered_nodes[:filter_top_k]
-                            print(f"     🔍 Advanced filter: {len(unique_new)} sentences retained")
+                        if sentence_texts:
+                            # Check if PhoBERT should be used for level filtering
+                            use_phobert_level = getattr(self, 'use_phobert_level_filtering', False)
+                            
+                            if use_phobert_level and hasattr(self, 'get_sentence_similarity'):
+                                # Use PhoBERT for level filtering
+                                print(f"     🔍 Using PhoBERT for level {level} filtering...")
+                                similarities = []
+                                for sent_text in sentence_texts:
+                                    try:
+                                        sim = self.get_sentence_similarity(sent_text, claim_text)
+                                        similarities.append(sim)
+                                    except Exception as e:
+                                        print(f"     ⚠️ PhoBERT similarity error: {e}")
+                                        similarities.append(0.0)  # Fallback score
+                            else:
+                                # Use SBERT for level filtering
+                                print(f"     🔍 Using SBERT for level {level} filtering...")
+                                from sklearn.metrics.pairwise import cosine_similarity
+                                claim_embedding = self.sbert_model.encode([claim_text])
+                                sentence_embeddings = self.sbert_model.encode(sentence_texts)
+                                similarities = cosine_similarity(claim_embedding, sentence_embeddings)[0]
+                            
+                            # Filter by similarity threshold (0.4 for level filtering)
+                            similarity_threshold = 0.4
+                            filtered_nodes = []
+                            for i, (node, similarity) in enumerate(zip(unique_new, similarities)):
+                                if similarity >= similarity_threshold:
+                                    filtered_nodes.append(node)
+                            
+                            # Keep at least filter_top_k sentences even if below threshold
+                            if len(filtered_nodes) < filter_top_k and unique_new:
+                                # Sort by similarity and take top filter_top_k
+                                node_sim_pairs = list(zip(unique_new, similarities))
+                                node_sim_pairs.sort(key=lambda x: x[1], reverse=True)
+                                filtered_nodes = [node for node, _ in node_sim_pairs[:filter_top_k]]
+                            
+                            unique_new = filtered_nodes
+                            print(f"     🔍 SBERT level filtering: {len(unique_new)} sentences retained")
                     except Exception as e:
-                        print(f"     ⚠️ Advanced filter error: {e}")
+                        print(f"     ⚠️ Level filtering error: {e}")
+                        # Continue with all sentences if filtering fails
+                else:
+                    print(f"     📦 Collected {len(unique_new)} raw sentences at level {level} (no level filtering)")
                 
                 # Cập nhật tracking
                 results[level] = level_paths

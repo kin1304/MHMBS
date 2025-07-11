@@ -578,10 +578,11 @@ class BeamSearchPathFinder:
         max_levels: int = 3,
         beam_width_per_level: int = 3,
         min_new_sentences: int = 2,   # ❶ bảo đảm mỗi level có ≥ 2 câu mới
-        advanced_data_filter=None,
+        sbert_model=None,
         claim_text: str = "",
         entities=None,
-        filter_top_k: int = 2
+        filter_top_k: int = 5,
+        use_phobert: bool = False  # Use SBERT by default, PhoBERT if True
     ) -> Dict[int, List[Path]]:
         """
         Multi-level beam search: từ claim → sentences → sentences liên quan → ...
@@ -649,33 +650,59 @@ class BeamSearchPathFinder:
                 final_new_sentences = self._extract_sentence_nodes_from_paths(level_paths)
                 unique_new = [s for s in final_new_sentences if s not in all_found_sentences]
 
-                # 🔄 Áp dụng AdvancedDataFilter (nếu có) để chọn seed cho level kế tiếp
-                if advanced_data_filter and claim_text and unique_new:
+                # 🔍 Apply SBERT/PhoBERT filtering at each level
+                if sbert_model and claim_text and unique_new:
                     try:
-                        raw_sentences = [
-                            {"sentence": self.graph.graph.nodes[node]["text"]}
-                            for node in unique_new
-                        ]
-                        filtered = advanced_data_filter.multi_stage_filtering_pipeline(
-                            sentences=raw_sentences,
-                            claim_text=claim_text,
-                            entities=entities or [],
-                            max_final_sentences=filter_top_k,
-                            min_quality_score=0.25,
-                            min_relevance_score=0.2
-                        )["filtered_sentences"]
-
-                        # Lấy node-ids tương ứng với các câu còn lại sau lọc
-                        filtered_texts = {s["sentence"] for s in filtered}
-                        filtered_nodes = [
-                            n for n in unique_new
-                            if self.graph.graph.nodes[n]["text"] in filtered_texts
-                        ]
-                        if filtered_nodes:
-                            unique_new = filtered_nodes[:filter_top_k]
-                            # print(f"   🔍 Advanced filter giữ {len(unique_new)} câu cho level tiếp theo")
+                        # Get sentence texts from nodes
+                        sentence_texts = []
+                        for node in unique_new:
+                            node_text = self.graph.graph.nodes[node].get("text", "")
+                            if node_text:
+                                sentence_texts.append(node_text)
+                        
+                        if sentence_texts:
+                            # Calculate similarities using SBERT or PhoBERT
+                            if use_phobert and hasattr(self.graph, 'get_sentence_similarity'):
+                                # Use PhoBERT via TextGraph method
+                                print(f"   🔍 Using PhoBERT for level {level} filtering...")
+                                similarities = []
+                                for sent_text in sentence_texts:
+                                    try:
+                                        sim = self.graph.get_sentence_similarity(sent_text, claim_text)
+                                        similarities.append(sim)
+                                    except Exception as e:
+                                        print(f"   ⚠️ PhoBERT similarity error: {e}")
+                                        similarities.append(0.0)  # Fallback score
+                            else:
+                                # Use SBERT
+                                print(f"   🔍 Using SBERT for level {level} filtering...")
+                                from sklearn.metrics.pairwise import cosine_similarity
+                                claim_embedding = sbert_model.encode([claim_text])
+                                sentence_embeddings = sbert_model.encode(sentence_texts)
+                                similarities = cosine_similarity(claim_embedding, sentence_embeddings)[0]
+                            
+                            # Filter by similarity threshold (0.4 for level filtering)
+                            similarity_threshold = 0.4
+                            filtered_nodes = []
+                            for i, (node, similarity) in enumerate(zip(unique_new, similarities)):
+                                if similarity >= similarity_threshold:
+                                    filtered_nodes.append(node)
+                            
+                            # Keep at least filter_top_k sentences even if below threshold
+                            if len(filtered_nodes) < filter_top_k and unique_new:
+                                # Sort by similarity and take top filter_top_k
+                                node_sim_pairs = list(zip(unique_new, similarities))
+                                node_sim_pairs.sort(key=lambda x: x[1], reverse=True)
+                                filtered_nodes = [node for node, _ in node_sim_pairs[:filter_top_k]]
+                            
+                            unique_new = filtered_nodes
+                            model_name = "PhoBERT" if use_phobert else "SBERT"
+                            print(f"   🔍 {model_name} level filtering: {len(unique_new)} sentences retained")
                     except Exception as e:
-                        print(f"⚠️  Advanced filter error (level {level}): {e}")
+                        print(f"   ⚠️ Level filtering error: {e}")
+                        # Continue with all sentences if filtering fails
+                else:
+                    print(f"   📦 Collected {len(unique_new)} raw sentences at level {level} (no level filtering)")
 
                 # ❸ Nếu chưa đủ, lấy thêm câu (không trùng) từ danh sách level_paths (đã xếp hạng)
                 if len(unique_new) < min_new_sentences:
