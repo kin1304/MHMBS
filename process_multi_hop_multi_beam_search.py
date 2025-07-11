@@ -59,9 +59,9 @@ class MultiHopMultiBeamProcessor:
     def __init__(self, num_hops: int = 3, use_advanced_filtering=True, use_sbert=True, 
                  use_contradiction_detection=True, use_entity_filtering=True,
                  min_quality_score: float = 0.3,
-                 min_relevance_score: float = 0.25, target_ratio: float = 0.5,
+                 min_relevance_score: float = 0.15, target_ratio: float = 0.5,
                  min_entity_score: float = 0.05,
-                 stance_delta: float = 0.08,
+                 stance_delta: float = 0.1,
                  require_subject_match: bool = False,
                  hop_decay_factor: float = 0.8):
         """
@@ -1392,8 +1392,8 @@ def main():
                        help='Enable contradiction detection (default: True)')
     parser.add_argument('--use_entity_filtering', action='store_true', default=True,
                        help='Enable entity-based filtering (default: True)')
-    parser.add_argument('--min_relevance_score', type=float, default=0.25,
-                       help='Minimum relevance score for advanced filtering (default: 0.25)')
+    parser.add_argument('--min_relevance_score', type=float, default=0.15,
+                       help='Minimum relevance score for advanced filtering (default: 0.15)')
     parser.add_argument('--min_quality_score', type=float, default=0.3,
                        help='Minimum quality score for advanced filtering (default: 0.3)')
     parser.add_argument('--max_final_sentences', type=int, default=25,
