@@ -121,7 +121,7 @@ class AdvancedDataFilter:
     def multi_stage_filtering_pipeline(self, sentences: List[Dict], claim_text: str,
                                      context_text: str = "", entities: Optional[List[str]] = None,
                                      min_quality_score: float = 0.3,
-                                     min_relevance_score: float = 0.15,
+                                     min_relevance_score: float = 0.25,
                                      min_entity_score: float = 0.05,
                                      stance_delta: float = 0.1,
                                      subject_keywords: Optional[Set[str]] = None,
