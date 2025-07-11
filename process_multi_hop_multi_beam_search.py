@@ -59,7 +59,7 @@ class MultiHopMultiBeamProcessor:
     def __init__(self, num_hops: int = 3, use_advanced_filtering=True, use_sbert=True, 
                  use_contradiction_detection=False, use_entity_filtering=True,
                  min_quality_score: float = 0.3,
-                 min_relevance_score: float = 0.25, target_ratio: float = 0.5,
+                 min_relevance_score: float = 0.15, target_ratio: float = 0.5,
                  min_entity_score: float = 0.05,
                  stance_delta: float = 0.1,
                  require_subject_match: bool = False,
@@ -130,8 +130,9 @@ class MultiHopMultiBeamProcessor:
         print(f"   - Entity-Based Filtering: {'✅' if self.use_entity_filtering else '❌'}")
 
     def process_multi_hop_search(self, text_graph: TextGraph, claim_text: str,
-                                max_levels=3, beam_width_per_level=6, 
-                                max_depth=30, max_final_sentences=30) -> Dict:
+                                max_levels: int = 3, beam_width_per_level: int = 6,
+                                max_depth: int = 30, max_final_sentences: int = 30,
+                                initial_entities: List[str] | None = None) -> Dict:
         """
         🚀 Process Multi-Hop Multi-Beam Search
         
@@ -148,13 +149,18 @@ class MultiHopMultiBeamProcessor:
         # Storage for all hop results
         hop_results = []
         all_accumulated_sentences = []
-        reused_entities: List[str] = []
+        # Reuse entities đã extract ở bước chuẩn bị (HOP 1)
+        reused_entities: List[str] = list(initial_entities) if initial_entities else []
         
         # Context sentences for reuse (extracted once)
         context_sentences: List[str] = []
         
+        print(f"\n🔍 DEBUG: Starting multi-hop process with num_hops={self.num_hops}")
+        print(f"🔍 DEBUG: Range will be: {list(range(1, self.num_hops + 1))}")
+        
         for hop_num in range(1, self.num_hops + 1):
             print(f"\n🚀 === HOP {hop_num}/{self.num_hops} ===")
+            print(f"🔍 DEBUG: Starting HOP {hop_num}")
             
             # Use fixed parameters (disable hop decay for testing)
             current_beam_width = beam_width_per_level
@@ -165,8 +171,9 @@ class MultiHopMultiBeamProcessor:
             if hop_num == 1:
                 # HOP 1: Traditional full pipeline
                 hop_result = self._process_first_hop(
-                    text_graph, claim_text, max_levels, current_beam_width, 
-                    current_max_depth, max_final_sentences
+                    text_graph, claim_text,
+                    max_levels, current_beam_width, current_max_depth,
+                    max_final_sentences, pre_entities=reused_entities
                 )
                 
                 # Store context sentences and entities for reuse
@@ -194,7 +201,11 @@ class MultiHopMultiBeamProcessor:
             hop_results.append(hop_result)
             all_accumulated_sentences.extend(hop_result['filtered_sentences'])
             
-            print(f"✅ Hop {hop_num} completed: {len(hop_result['filtered_sentences'])} sentences")
+            # 🔄 Entities remain unchanged between hops (reuse existing entities)
+            print(f"✅ Hop {hop_num} completed: {len(hop_result['filtered_sentences'])} sentences, reusing {len(reused_entities)} entities")
+            print(f"🔍 DEBUG: Completed HOP {hop_num}, continuing to next hop...")
+        
+        print(f"🔍 DEBUG: Finished all {self.num_hops} hops, proceeding to final aggregation")
         
         # FINAL AGGREGATION AND RANKING
         print(f"\n🔄 Aggregating results from {self.num_hops} hops...")
@@ -207,7 +218,7 @@ class MultiHopMultiBeamProcessor:
 
     def _process_first_hop(self, text_graph: TextGraph, claim_text: str,
                           max_levels: int, beam_width: int, max_depth: int,
-                          max_final_sentences: int) -> Dict:
+                          max_final_sentences: int, pre_entities: List[str] | None = None) -> Dict:
         """
         🌱 Process First Hop - Có thể dùng Direct Entity Connection hoặc Traditional Beam Search
         """
@@ -379,15 +390,52 @@ class MultiHopMultiBeamProcessor:
                 print(f"❌ Hop 1: Context fallback failed: {e}")
                 all_sentences = []
         
-        # STAGE 2: Reuse existing global entities (already extracted)
-        entities = []
-        if self.use_entity_filtering:
+        # STAGE 2: ENTITY SETUP (Reuse if provided, otherwise extract once)
+        if pre_entities:
+            entities = pre_entities  # Reuse pre-extracted entities
+            print(f"🏷️ Hop 1: Reusing {len(entities)} pre-extracted entities (no new extraction)")
+            entity_nodes = []  # Skip adding – already in graph
+        else:
+            entities = []
+        if not pre_entities and self.use_entity_filtering:
             try:
-                # Fallback to simple entity extraction
+                print(f"🏷️ Hop 1: Starting FULL entity extraction...")
+                
+                # Get context text from graph
+                context_text = self._get_context_text(text_graph)
+                
+                # 1. Extract phrase entities từ claim
+                claim_phrase_entities = text_graph.extract_phrases_from_claim(
+                    claim_text=claim_text,
+                    claim_sentences=text_graph.claim_sentences if hasattr(text_graph, 'claim_sentences') else None
+                )
+                
+                # 2. Extract entities with OpenAI
+                openai_entities = []
+                if context_text and len(context_text) > 50:
+                    openai_entities = text_graph.extract_entities_with_openai(context_text + "\n" + claim_text)
+                
+                # 3. Merge and deduplicate entities
+                all_entities = claim_phrase_entities + openai_entities
+                seen = set()
                 entities = []
-                print(f"🏷️ Hop 1: No global entities available")
+                for entity in all_entities:
+                    entity_normalized = entity.lower().strip()
+                    if entity_normalized not in seen and len(entity.strip()) > 2:
+                        seen.add(entity_normalized)
+                        entities.append(entity.strip())
+                
+                # 4. Add entities to graph
+                if entities:
+                    text_graph.add_entities_to_graph(
+                        entities=entities,
+                        context_sentences=text_graph.context_sentences if hasattr(text_graph, 'context_sentences') else {}
+                    )
+                    
+                print(f"✅ Hop 1: Extracted {len(entities)} entities and added to graph")
+                
             except Exception as e:
-                print(f"⚠️ Hop 1: Failed to get global entities: {e}")
+                print(f"⚠️ Hop 1: Entity extraction failed: {e}")
                 entities = []
         
         # STAGE 3: Hop 1 - Advanced filtering với điều kiện DỄ HƠN
@@ -456,20 +504,24 @@ class MultiHopMultiBeamProcessor:
                                max_depth: int, max_final_sentences: int,
                                all_accumulated_sentences: List[Dict]) -> Dict:
         """
-        🔄 Process Subsequent Hop - Chạy từng sentence riêng biệt trong các vòng lặp
+        🔄 HOP 2-N: Individual Loop Pipeline
+        For EACH sentence from previous hop: run complete individual pipeline
         """
-        try:
-            print(f"🔄 Hop {hop_num}: Processing {len(previous_sentences)} sentences individually...")
+        print(f"🔄 HOP {hop_num}: Individual Loop Pipeline")
+        print(f"📋 Processing {len(previous_sentences)} sentences from previous hop...")
         
+        try:
             # Track all sentences already found để tránh trùng lặp
             existing_sentence_texts = set()
             for sent_data in all_accumulated_sentences:
                 sentence_text = sent_data['sentence'].replace('_', ' ').strip().lower()
                 existing_sentence_texts.add(sentence_text)
             
-
-            
-            # Process each sentence individually in separate loops
+            # 🏷️ Stage 2: Reuse Entities (không extract lại)
+            print(f"🏷️ Stage 2: Reusing {len(reused_entities)} entities from HOP 1...")
+            updated_entities = reused_entities  # Keep entities unchanged
+                
+            # 📋 For EACH sentence from previous hop: Individual Pipeline
             all_new_sentences = []
             individual_results = []
             
@@ -478,10 +530,11 @@ class MultiHopMultiBeamProcessor:
                 if not sentence_text or len(sentence_text) <= 10:
                     continue
                     
-                print(f"\n🔍 Hop {hop_num}: Processing individual sentence {i}/{len(previous_sentences)}")
-                print(f"   Start Node: {sentence_text[:80]}...")
+                print(f"\n📋 Sentence {i}/{len(previous_sentences)}: {sentence_text[:80]}...")
                 
-                # STAGE 1: Beam Search từ sentence này
+                # 🌱 Stage 1: Beam Search (từ sentence này)
+                print(f"   🌱 Stage 1: Beam Search from this sentence...")
+                
                 # Tìm sentence node ID từ sentence text
                 start_node_id = None
                 for node_id, node_data in text_graph.graph.nodes(data=True):
@@ -491,7 +544,7 @@ class MultiHopMultiBeamProcessor:
                         break
                 
                 if not start_node_id:
-                    print(f"   ⚠️ Could not find node ID for sentence: {sentence_text[:50]}...")
+                    print(f"      ❌ Could not find node ID for sentence: {sentence_text[:50]}...")
                     continue
                     
                 individual_multi_results = text_graph.multi_level_beam_search_paths(
@@ -499,14 +552,14 @@ class MultiHopMultiBeamProcessor:
                     beam_width_per_level=beam_width,
                     max_depth=max_depth,
                     claim_text=claim_text,
-                    entities=reused_entities
+                    entities=updated_entities  # Use updated entities with new ones from evidence
                 )
                 
                 # Pass use_phobert option to beam search if available
                 if hasattr(self, 'use_phobert_level_filtering'):
                     text_graph.use_phobert_level_filtering = self.use_phobert_level_filtering
                 
-                # Extract sentences from this individual search với deduplication
+                # Extract sentences từ beam search results
                 individual_sentences = []
                 local_seen = set()
                 for level, paths in individual_multi_results.items():
@@ -515,13 +568,18 @@ class MultiHopMultiBeamProcessor:
                     for sent in level_sentences:
                         # Validate sent is a dictionary
                         if not isinstance(sent, dict):
-                            print(f"⚠️ Warning: sent in individual level_sentences is not a dict: {type(sent)}, value: {sent}")
+                            print(f"      ⚠️ Warning: sent in individual level_sentences is not a dict: {type(sent)}, value: {sent}")
                             continue
                             
                         sent_text = sent.get('sentence', '').strip()
                         if sent_text and sent_text not in local_seen:
                             local_seen.add(sent_text)
                             individual_sentences.append(sent)
+                
+                print(f"      ✅ Found {len(individual_sentences)} sentences from beam search")
+                
+                # 🏷️ Stage 2: Reuse Entities (không extract lại)
+                print(f"   🏷️ Stage 2: Reusing {len(updated_entities)} entities from HOP 1")
                 
 
                 
@@ -560,7 +618,7 @@ class MultiHopMultiBeamProcessor:
             if all_new_sentences and self.use_advanced_filtering and self.advanced_filter:
                 print(f"🔍 Hop {hop_num}: Applying advanced filtering to {len(all_new_sentences)} raw sentences...")
                 filtered_sentences = self._apply_advanced_filtering(
-                    all_new_sentences, claim_text, reused_entities, 
+                    all_new_sentences, claim_text, updated_entities,  # Use updated entities with new ones
                     max_final_sentences, hop_num=hop_num
                 )
                 print(f"✅ Hop {hop_num}: Advanced filter kept {len(filtered_sentences)}/{len(all_new_sentences)} sentences")
@@ -594,14 +652,15 @@ class MultiHopMultiBeamProcessor:
                 'start_nodes_count': len(previous_sentences),
                 'individual_results': individual_results,
                 'raw_sentences': all_new_sentences,  # All new sentences before limiting
-                'entities': reused_entities,  # Reused
+                'entities': updated_entities,  # Updated entities including new ones from evidence
                 'filtered_sentences': final_limited_sentences,  # Final limited sentences
                 'statistics': {
                     'start_nodes_processed': len(previous_sentences),
                     'raw_count': len(all_new_sentences),
                     'filtered_count': len(final_limited_sentences),
-                    'entities_count': len(reused_entities),
-                    'duplicate_avoidance_count': len(existing_sentence_texts)
+                    'entities_count': len(updated_entities),
+                    'duplicate_avoidance_count': len(existing_sentence_texts),
+                    'entities_reused': len(reused_entities)  # Track reused entities instead
                 }
             }
         except Exception as e:
@@ -1185,53 +1244,35 @@ def process_sample_with_multi_hop_search(sample_data, model, processor: MultiHop
             print(f"⚠️ Entity setup failed: {e}")
             entity_nodes = []
         
-        # 🚀 RUN ENHANCED MULTI-HOP MULTI-BEAM SEARCH WITH DIRECT CONNECTIONS
-        enhanced_results = text_graph.enhanced_multi_level_beam_search_with_direct_connections(
+        # 🚀 RUN TRUE MULTI-HOP SEARCH USING NEW PROCESSOR
+        enhanced_results = processor.process_multi_hop_search(
+            text_graph=text_graph,
+            claim_text=claim,
             max_levels=max_levels,
             beam_width_per_level=beam_width_per_level,
             max_depth=max_depth,
-            min_new_sentences=2,
-            advanced_data_filter=processor.advanced_filter if hasattr(processor, 'advanced_filter') else None,
-            claim_text=claim,
-            entities=all_entities,
-            filter_top_k=max_final_sentences,
-            use_direct_as_starting_points=True,
-            sort_by_original_order=sort_by_original_order
+            max_final_sentences=max_final_sentences,
+            initial_entities=all_entities # Pass extracted entities to the next hop
         )
         
-        # Convert enhanced results to traditional format
-        merged_sentences = enhanced_results.get('merged_sentences', [])
+        # Extract final sentences from multi-hop results
+        final_sentences = enhanced_results.get('final_sentences', [])
+        aggregated_sentences = enhanced_results.get('aggregated_sentences', [])
         
-        # ✅ DEDUPLICATION: Convert merged_sentences format to final_sentences format
-        final_sentences = []
-        seen_texts = set()
+        # ✅ Ensure final_sentences is properly formatted
+        if not final_sentences and aggregated_sentences:
+            final_sentences = aggregated_sentences[:max_final_sentences]
         
         def normalize_for_dedup(text):
             """Normalize text for deduplication"""
             return ' '.join(text.strip().lower().split())
         
-        for sentence_data in merged_sentences:
-            sentence_text = sentence_data.get('sentence_text', '')
-            normalized_text = normalize_for_dedup(sentence_text)
-            
-            # ✅ Skip duplicates
-            if normalized_text not in seen_texts and len(sentence_text.strip()) > 5:
-                final_sentences.append({
-                    'sentence': sentence_text,
-                    'score': sentence_data.get('path_score', 0.0),
-                    'level': sentence_data.get('level', 0),
-                    'source': sentence_data.get('source', 'enhanced_search'),
-                    'hop_distance': sentence_data.get('hop_distance', 1),
-                    'similarity_score': sentence_data.get('similarity_score', 0.0),
-                    'path_length': sentence_data.get('path_length', 1)
-                })
-                seen_texts.add(normalized_text)
-        
+        # Multi-hop results are already processed
         multi_hop_results = {
             'final_sentences': final_sentences,
-            'comprehensive_statistics': enhanced_results.get('statistics', {}),
-            'filtering_approach': 'enhanced_multi_level_beam_search_with_direct_connections',
-            'num_hops': 3
+            'comprehensive_statistics': enhanced_results.get('comprehensive_statistics', {}),
+            'filtering_approach': enhanced_results.get('filtering_approach', 'multi_hop_multi_beam_search'),
+            'num_hops': enhanced_results.get('num_hops', processor.num_hops)
         }
         comprehensive_stats = multi_hop_results['comprehensive_statistics']
         
@@ -1351,8 +1392,8 @@ def main():
                        help='Enable contradiction detection (default: True)')
     parser.add_argument('--use_entity_filtering', action='store_true', default=True,
                        help='Enable entity-based filtering (default: True)')
-    parser.add_argument('--min_relevance_score', type=float, default=0.25,
-                       help='Minimum relevance score for advanced filtering (default: 0.25)')
+    parser.add_argument('--min_relevance_score', type=float, default=0.15,
+                       help='Minimum relevance score for advanced filtering (default: 0.15)')
     parser.add_argument('--min_quality_score', type=float, default=0.3,
                        help='Minimum quality score for advanced filtering (default: 0.3)')
     parser.add_argument('--max_final_sentences', type=int, default=25,
@@ -1424,9 +1465,9 @@ def main():
     
     # Configuration - Updated to match new defaults
     num_samples = args.max_samples
-    max_levels = 3  # ✅ Updated from 5 to 3
-    beam_width_per_level = 6  # ✅ Updated from 15 to 6  
-    max_depth = 30  # ✅ Updated from 80 to 30
+    max_levels = 4  # ✅ Updated from 3 to 4
+    beam_width_per_level = 10  # ✅ Updated from 6 to 10  
+    max_depth = 50  # ✅ Updated from 30 to 50
     max_final_sentences = args.max_final_sentences
     
     print(f"📊 Processing {num_samples} samples with Multi-Hop Multi-Beam Search")

@@ -121,7 +121,7 @@ class AdvancedDataFilter:
     def multi_stage_filtering_pipeline(self, sentences: List[Dict], claim_text: str,
                                      context_text: str = "", entities: Optional[List[str]] = None,
                                      min_quality_score: float = 0.3,
-                                     min_relevance_score: float = 0.25,
+                                     min_relevance_score: float = 0.15,
                                      min_entity_score: float = 0.05,
                                      stance_delta: float = 0.1,
                                      subject_keywords: Optional[Set[str]] = None,
@@ -319,6 +319,10 @@ class AdvancedDataFilter:
             sentence_data['entity_score'] = entity_score
             sentence_data['entity_analysis'] = self._analyze_entity_presence(sentence_text, entities)
             
+            # BYPASS: nếu câu đã rất giống claim (relevance_score >= 0.9) thì giữ nguyên
+            if sentence_data.get('relevance_score', 0) >= 0.9:
+                entity_filtered.append(sentence_data)
+                continue
             # Keep sentences with at least some entity relevance
             if entity_score >= min_entity_score:
                 entity_filtered.append(sentence_data)
@@ -598,7 +602,25 @@ class AdvancedDataFilter:
                 coherence_score * 0.4
             )
         
-        return min(1.0, relevance_score)
+        # ⭐ BOOST: nếu câu chứa chuỗi con dài (>=6 từ liên tiếp) của claim, cộng bonus
+        long_sub_bonus = 0.0
+        claim_tokens = claim_text.lower().split()
+        sent_lower = sentence_text.lower()
+
+        for n in range(10, 5, -1):  # thử 10-gram xuống 6-gram
+            if len(claim_tokens) < n:
+                continue
+            for i in range(len(claim_tokens) - n + 1):
+                ngram = " ".join(claim_tokens[i:i + n])
+                if ngram and ngram in sent_lower:
+                    long_sub_bonus = 0.3  # cộng 0.3 để vượt threshold
+                    break
+            if long_sub_bonus:
+                break
+
+        relevance_score = min(1.0, relevance_score + long_sub_bonus)
+
+        return relevance_score
 
     def _calculate_entity_based_score(self, sentence_text: str, entities: Optional[List[str]], 
                                     claim_text: str) -> float:
